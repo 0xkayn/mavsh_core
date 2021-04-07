@@ -41,10 +41,13 @@ class MavshComponent:
         return self._status
     
     @status.setter
-    def status(self, val):
-        if val not in [mlink.MAVSH_INACTIVE, mlink.MAVSH_ACTIVE]:
+    def status(self, status):
+        if status not in [mlink.MAVSH_INACTIVE, mlink.MAVSH_ACTIVE]:
             raise Exception("Invalid session status. Must be MAVSH_INACTIVE or MAVSH_ACTIVE")        
-    
+        
+        self._status = status
+        
+
     def __repr__(self):
         if self.conn is not None:
             return f'sysid: {self.sysid}\n' \
@@ -156,7 +159,7 @@ class MavshCompanion(MavshComponent):
             
             if synack:
                 synack_recv = True            
-        
+        print(status)
         return status
     
     def send_mavsh_shutdown(self, status):
@@ -182,7 +185,7 @@ class MavshCompanion(MavshComponent):
         # ensure the shutdown is coming from the system we expect it to
         if self.target_system == mes.sys_id and self.target_component == mes.comp_id:
             self.send_mavsh_shutdown(mlink.MAVSH_EXITING)
-            self.status = mlink.MAVSH_INACTIVE
+            #self.status = mlink.MAVSH_INACTIVE
         
         # otherwise send a shutdown not allowed response
         else:
@@ -210,7 +213,7 @@ class MavshCompanion(MavshComponent):
                 # this is blocking, will have to consider changing this
                 
                 accepted = self.recv_synack(mes, mlink.MAVSH_ACCEPTED)
-                
+                print(mlink.MAVSH_ACCEPTED)
                 # this should/will always evaluate to true
                 if accepted == mlink.MAVSH_ACCEPTED:                    
                     self.status = mlink.MAVSH_ACTIVE
@@ -278,9 +281,12 @@ class MavshCompanion(MavshComponent):
             elif mes_type == "MAVSH_SYNACK":
                 print(mes)
                 self.send_synack()
-                self.status = mlink.MAVSH_ACTIVE
+                
                 print("MAVSH SESSION ACCEPTED")
-                print(mlink.MAVSH_ACTIVE)
+                time.sleep(.5)
+                self.status = mlink.MAVSH_ACTIVE
+                print(self.status)
+                #print(mlink.MAVSH_ACTIVE)
             elif mes_type == "MAVSH_SHUTDOWN":
                 print(mes)
                 self.handle_mavsh_shutdown(mes)
@@ -361,7 +367,7 @@ class MavshGCS(MavshComponent):
             # not sure rn - only occurs w/invalid gcs/sysid combos
             print('session rejected??')
             return mlink.MAVSH_REJECTED
-        
+
         elif mes.status_flag == mlink.MAVSH_SESSION_EXISTS:
             print('session exists')
             # if a session exists already but not with us then something is wrong...
@@ -375,9 +381,9 @@ class MavshGCS(MavshComponent):
                 shutdown_msg = self.conn.recv_match(type='MAVSH_SHUTDOWN', blocking=True, timeout=15)                
                 #shutdown is accepted
                 if shutdown_msg.shutdown_flag == mlink.MAVSH_EXITING:                
-                    self.active = mlink.MAVSH_INACTIVE
+                    self.status = mlink.MAVSH_INACTIVE
                     # self.console.kill or something like this
-                    #                     
+                                         
                 # if its not accepted then someone must have another session open...
                 elif shutdown_msg.shutdown_flag == mlink.MAVSH_SHUTDOWN_NOT_ALLOWED:
                     pass
