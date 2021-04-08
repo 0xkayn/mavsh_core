@@ -319,7 +319,11 @@ class MavshGCS(MavshComponent):
         # sadly ardupilot doesnt use it - ill add it to custom firmware once 4.1 stable is out
         self.target_component = 191         
         
+        self.loop = asyncio.get_event_loop()        
+        self.loop.create_task(self.mavsh_init())
+        self.loop.create_task(self.message_loop())
         
+
     # not sure if 2 mav_type gcs' will cause issues or not, might need to setup signing and have both have the key
     def send_heartbeats(self):
         now = time.time()
@@ -332,6 +336,35 @@ class MavshGCS(MavshComponent):
                 0,
                 0
             )
+    
+
+    def send_mavsh_init(self):
+        self.conn.mav.mavsh_init_send(            
+            self._system_id,
+            self._component_id,
+            self.target_system,
+            self.target_component,
+            mlink.MAVSH_INIT
+        )
+        return
+
+    def send_synack(self):
+        self.conn.mav.mavsh_synack_send(
+            self._system_id,
+            self._component_id,
+            self.target_system,
+            self.target_component
+        )
+        return
+    
+    def recv_synack(self):
+        synack_msg = self.conn.recv_match(type="MAVSH_SYNACK")        
+        while not synack_msg:                  
+            self.send_synack()
+            synack_msg = self.conn.recv_match(type='MAVSH_SYNACK', blocking=False,timeout=None)
+            time.sleep(1) # the location of these sleeps is causing issues
+            
+        return synack_msg
 
     def request_mavsh_shutdown(self):
         self.conn.mav.mavsh_shutdown_send(
@@ -342,20 +375,16 @@ class MavshGCS(MavshComponent):
             mlink.MAVSH_SHUTDOWN
         )
         return
+    
+    async def print_mes(self, mes):
+        print(mes)
 
-    def handle_mavsh_ack(self, mes):
+    async def handle_mavsh_ack(self, mes):
         
         if mes.status_flag == mlink.MAVSH_ACCEPTED:        
             # might need to make it active on the synack instead
-            self.status = mlink.MAVSH_ACTIVE
-
-            self.conn.mav.mavsh_synack_send(
-                self._system_id,
-                self._component_id,
-                self.target_system,
-                self.target_component
-            )
-            
+            self.status = mlink.MAVSH_ACTIVE                        
+            synack_msg = self.recv_synack()
             # since theres no way to guarantee message delivery in general I should probably also have the CC send a synack
             # if we recv it then we know the message was sent - 
             # im gonna have to write an FCS function wont I....
@@ -389,35 +418,22 @@ class MavshGCS(MavshComponent):
                     pass
                     # this is the actual sus part...                           
     
-    def send_mavsh_init(self):
-        self.conn.mav.mavsh_init_send(            
-            self._system_id,
-            self._component_id,
-            self.target_system,
-            self.target_component,
-            mlink.MAVSH_INIT
-        )
-        return
     
-    def mavsh_init(self):        
+    
+    async def mavsh_init(self):        
         """ MAVSH init procedure """
         
-        ack_msg = self.conn.recv_match(type='MAVSH_ACK', blocking=False,timeout=None)        
-        
+        ack_msg = self.conn.recv_match(type='MAVSH_ACK', blocking=False, timeout=None)        
         while not ack_msg:            
             self.send_mavsh_init()            
-            ack_msg = self.conn.recv_match(type='MAVSH_ACK', blocking=False,timeout=None)
-            time.sleep(.5) # the location of these sleeps is causing issues
-            # really need to setup a good retransmission mechanism
+            ack_msg = self.conn.recv_match(type='MAVSH_ACK', blocking=False, timeout=None)
+            time.sleep(.5) # the location of these sleeps is causing issues            
         
-        self.handle_mavsh_ack(ack_msg)                
-
         return ack_msg.status_flag
     
-    def message_loop(self):
-
+    async def message_loop(self):
         
-        while True:            
+        while True:
             self.send_heartbeats()                 
             
             mes = self.conn.recv_match(blocking=False)              
@@ -427,10 +443,14 @@ class MavshGCS(MavshComponent):
             
             # a gcs shouldn't be getting an init
             if mes_type == "MAVSH_INIT":
-                pass            
-            
+                pass
+
+            # handled in mavsh_init?
             elif mes_type == "MAVSH_ACK":                
-                self.handle_mavsh_ack(mes)
+                #self.handle_mavsh_ack(mes)
+                #self.loop.create_task(self.handle_mavsh_ack(mes))
+                print(mes)
+                await self.handle_mavsh_ack(mes)                
             
             # we shouldnt get a mavsh_exec
             elif mes_type == "MAVSH_EXEC":
@@ -445,7 +465,7 @@ class MavshGCS(MavshComponent):
                 pass
             
             elif mes_type == "MAVSH_SYNACK":
-                print(mes)
+                await self.print_mes(mes)
 
             elif mes_type == "MAVSH_SHUTDOWN":
                 print(mes)
