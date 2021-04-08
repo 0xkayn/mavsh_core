@@ -1,5 +1,12 @@
 from connection import *
+from mavsh_exceptions import * 
+import asyncio
 
 rpi = MavshCompanion('/dev/ttyS0')
 print(rpi)
-rpi.message_loop()
+try:
+    rpi.message_loop()
+    rpi.loop.run_forever()
+    
+except SessionExistsException:
+    pass

@@ -3,6 +3,8 @@ import time
 import shlex
 import serial
 import asyncio
+from queue import Queue
+from threading import Thread
 from pymavlink import mavutil
 from mavsh_exceptions import *
 from asyncio.subprocess import PIPE, STDOUT
@@ -109,7 +111,8 @@ class MavshCompanion(MavshComponent):
         self.mode = '' # not supported rn
         self._last_heartbeat_sent = 0    
         self.target_system = None
-        self.target_component = None                    
+        self.target_component = None          
+        self.loop = asyncio.get_event_loop()
 
     def send_heartbeat(self):
         self.conn.mav.heartbeat_send(
@@ -215,7 +218,7 @@ class MavshCompanion(MavshComponent):
                 print(mlink.MAVSH_ACCEPTED)
                 # this should/will always evaluate to true
                 if accepted == mlink.MAVSH_ACCEPTED:                    
-                    self.status = mlink.MAVSH_ACTIVE
+                    #self.status = mlink.MAVSH_ACTIVE
                     return mlink.MAVSH_ACCEPTED
                 else:
                     raise Exception("MAVSH_ACCEPTED exception")
@@ -279,12 +282,15 @@ class MavshCompanion(MavshComponent):
             
             elif mes_type == "MAVSH_SYNACK":
                 print(mes)
-                self.send_synack()
+                for i in range(3):
+                    self.send_synack()
+                    time.sleep(1)
                 
                 print("MAVSH SESSION ACCEPTED")
-                time.sleep(.5)
-                #self.status = mlink.MAVSH_ACTIVE
-                                
+                self.status = mlink.MAVSH_ACTIVE
+                self.loop.create_task(self.shell_loop())
+                return mlink.MAVSH_ACTIVE
+
                 #print(mlink.MAVSH_ACTIVE)
             elif mes_type == "MAVSH_SHUTDOWN":
                 print(mes)
@@ -296,6 +302,116 @@ class MavshCompanion(MavshComponent):
                 pass
 
             else:                
+                pass
+
+
+    async def handle_mavsh_exec(self, mes):         
+        
+        async def run_cmd(cmd):
+            # shlex.split will escape characters used for cmd injection
+            # but create_subprocess_shell requires a string so we join the list
+            cmd = " ".join(shlex.split(cmd))
+            p = await asyncio.create_subprocess_shell(cmd,
+                stdin=PIPE, 
+                stdout=PIPE, 
+                stderr=STDOUT
+            )
+            
+            command_started = time.time()
+            
+            now = time.time()
+            if now - command_started > 1.5:
+
+                self.conn.mav.mavsh_response_send(
+                    self._system_id,
+                    self._component_id,
+                    self.target_system,
+                    self.target_component,
+                    mlink.MAVSH_EXECUTING,
+                    b''
+                )
+
+            return (await p.communicate())[0]
+        
+        command_started = time.time()
+        result = await run_cmd(mes.payload)        
+        
+        command_started = time.time()
+        # send a response message every 2 seconds to let us know if the command has finished
+        # this will be particularly useful when showing when a command/scan completes on my OSD        
+        print(result)        
+        response_queue = Queue()
+        
+        if len(result) > 154:
+            def chunk_result(res, q):        
+                # chunks the response message into a max size of 154 bytes          
+                #return [res[i:i+154] for i in range(0, len(res), 154)]
+                for i in range(0, len(res), 154):                        
+                    q.put(res[i:i+154])
+            
+            chunk_result(result, response_queue)
+        else :
+            response_queue.put(result)
+        
+        
+        # need to modify this to let us know when the final chunk is being sent/when full packet ends 
+        while not response_queue.empty():
+            try:
+                chunk = response_queue.get()
+                if response_queue.qsize() == 0:
+                    self.conn.mav.mavsh_response_send(
+                        self._system_id,
+                        self._component_id,
+                        self.target_system,
+                        self.target_component,
+                        mlink.MAVSH_IDLE, # command status mlink.complete
+                        bytes(chunk)
+                    )
+
+                else:                
+                    self.conn.mav.mavsh_response_send(
+                        self._system_id,
+                        self._component_id,
+                        self.target_system,
+                        self.target_component,
+                        mlink.MAVSH_EXECUTING, # command status cmd in progress
+                        bytes(chunk)
+                    )
+                
+                time.sleep(.5)
+            except Empty:
+                self.conn.mav.mavsh_response_send(
+                    self._system_id,
+                    self._component_id,
+                    self.target_system,
+                    self.target_component,
+                    mlink.MAVSH_IDLE, # command status mlink.complete
+                    b""
+                )
+
+        return result
+
+    async def shell_loop(self):                       
+        
+        while True:
+            self.send_heartbeats()
+
+            mes = self.conn.recv_match(blocking=False)              
+            while not mes:  
+                mes = self.conn.recv_match(blocking=False)
+            mes_type = mes.get_type()
+                        
+            if mes_type == "MAVSH_EXEC":
+                await self.handle_mavsh_exec(mes)
+
+            elif mes_type == "MAVSH_RESPONSE":
+                pass
+                        
+            elif mes_type == "MAVSH_SHUTDOWN":
+                print(mes)
+                
+            else:                
+                #print(mes)
                 pass
 
 class MavshGCS(MavshComponent):
@@ -332,6 +448,29 @@ class MavshGCS(MavshComponent):
                 0,
                 0
             )
+    
+    def send_synack(self):
+        self.conn.mav.mavsh_synack_send(
+            self._system_id,
+            self._component_id,
+            self.target_system,
+            self.target_component
+        )
+        return
+    
+    def recv_synack(self):
+        """ Send a MAVSH_SYNACK and wait for a MAVSH_SYNACK """
+        
+        synack = self.conn.recv_match(type='MAVSH_SYNACK', blocking=False,timeout=None)
+        while not synack:
+            self.send_synack()            
+            synack = self.conn.recv_match(type='MAVSH_SYNACK', blocking=False)                                
+            if synack:                
+                return synack
+
+            time.sleep(.5)
+            
+        return synack   
 
     def request_mavsh_shutdown(self):
         self.conn.mav.mavsh_shutdown_send(
@@ -341,21 +480,37 @@ class MavshGCS(MavshComponent):
             self.target_component,
             mlink.MAVSH_SHUTDOWN
         )
+        return                            
+    
+    def send_mavsh_init(self):
+        self.conn.mav.mavsh_init_send(            
+            self._system_id,
+            self._component_id,
+            self.target_system,
+            self.target_component,
+            mlink.MAVSH_INIT
+        )
         return
+    
+    def mavsh_init(self):        
+        """ MAVSH init procedure """
+        
+        ack_msg = self.conn.recv_match(type='MAVSH_ACK', blocking=False,timeout=None)        
+        
+        while not ack_msg:            
+            self.send_mavsh_init()            
+            ack_msg = self.conn.recv_match(type='MAVSH_ACK', blocking=False,timeout=None)
+            time.sleep(.5) # the location of these sleeps is causing issues
+            # really need to setup a good retransmission mechanism
+        
+        self.handle_mavsh_ack(ack_msg)                
+
+        return ack_msg.status_flag
 
     def handle_mavsh_ack(self, mes):
         
-        if mes.status_flag == mlink.MAVSH_ACCEPTED:        
-            # might need to make it active on the synack instead
-            self.status = mlink.MAVSH_ACTIVE
-
-            self.conn.mav.mavsh_synack_send(
-                self._system_id,
-                self._component_id,
-                self.target_system,
-                self.target_component
-            )
-            
+        if mes.status_flag == mlink.MAVSH_ACCEPTED:
+            synack = self.recv_synack()            
             # since theres no way to guarantee message delivery in general I should probably also have the CC send a synack
             # if we recv it then we know the message was sent - 
             # im gonna have to write an FCS function wont I....
@@ -387,66 +542,36 @@ class MavshGCS(MavshComponent):
                 # if its not accepted then someone must have another session open...
                 elif shutdown_msg.shutdown_flag == mlink.MAVSH_SHUTDOWN_NOT_ALLOWED:
                     pass
-                    # this is the actual sus part...                           
+                    # this is the actual sus part...   
     
-    def send_mavsh_init(self):
-        self.conn.mav.mavsh_init_send(            
-            self._system_id,
-            self._component_id,
-            self.target_system,
-            self.target_component,
-            mlink.MAVSH_INIT
-        )
-        return
     
-    def mavsh_init(self):        
-        """ MAVSH init procedure """
-        
-        ack_msg = self.conn.recv_match(type='MAVSH_ACK', blocking=False,timeout=None)        
-        
-        while not ack_msg:            
-            self.send_mavsh_init()            
-            ack_msg = self.conn.recv_match(type='MAVSH_ACK', blocking=False,timeout=None)
-            time.sleep(.5) # the location of these sleeps is causing issues
-            # really need to setup a good retransmission mechanism
-        
-        self.handle_mavsh_ack(ack_msg)                
 
-        return ack_msg.status_flag
-    
+
     def message_loop(self):
 
         
-        while True:            
+        while self.status != mlink.MAVSH_ACTIVE:   
+        #while True:
             self.send_heartbeats()                 
-            
+
             mes = self.conn.recv_match(blocking=False)              
             while not mes:  
                 mes = self.conn.recv_match(blocking=False)
             mes_type = mes.get_type()
-            
-            # a gcs shouldn't be getting an init
-            if mes_type == "MAVSH_INIT":
-                pass            
-            
-            elif mes_type == "MAVSH_ACK":                
+                        
+            if mes_type == "MAVSH_ACK":                
                 self.handle_mavsh_ack(mes)
-            
-            # we shouldnt get a mavsh_exec
-            elif mes_type == "MAVSH_EXEC":
-                #print(await self.loop.create_task(self.handle_mavsh_exec(mes)))
-                #print( (await self.handle_mavsh_exec(mes)) )                
-                #print(self.loop.create_task(self.run_cmd(mes.payload)))
-                #print(self.handle_mavsh_exec(mes).decode)
-                print(mes)
-            
+                        
             # handle the shell portion here
             elif mes_type == "MAVSH_RESPONSE":
                 pass
             
             elif mes_type == "MAVSH_SYNACK":
                 print(mes)
-
+                if self.status == mlink.MAVSH_INACTIVE:
+                    self.status = mlink.MAVSH_ACTIVE
+                    return self.status
+            
             elif mes_type == "MAVSH_SHUTDOWN":
                 print(mes)
 
@@ -458,3 +583,93 @@ class MavshGCS(MavshComponent):
             else:                
                 #print(mes)
                 pass
+    
+    def heartbeat_loop(self):
+        while True:
+            self.send_heartbeats()
+    
+    def send_mavsh_exec(self, status, cmd):
+        # check to ensure cmd is bytes object
+
+        self.conn.mav.mavsh_exec_send(
+            self._system_id,
+            self._component_id,
+            self.target_system,
+            self.target_component,
+            status,
+            cmd
+        )
+
+        return
+
+    def handle_mavsh_response(self, mes, q):
+                
+        # check to see if we will be recv more messages
+        if mes.cmd_status == mlink.MAVSH_IDLE:
+            out = mes.response
+            while not q.empty():
+                try:
+                    out += q.get()
+                except Empty:
+                    return out
+
+        elif mes.cmd_status == mlink.MAVSH_EXECUTING:
+            q.put(mes.response)
+            return mes.cmd_status
+                    
+
+    def handle_mavsh_resq(self, mes, q):        
+        #print(mes.response)
+        if mes.cmd_status == mlink.MAVSH_EXECUTING:
+            res += mes.response
+            mes_q.put(mes.response)
+            input_ready = False
+
+        elif mes.cmd_status == mlink.MAVSH_IDLE:
+            res += mes.response
+            print(res)
+            out = mes.response
+            while not mes_q.empty():
+                try:
+                    print(mes_q.get())
+                except Empty:
+                    print(out)
+                    input_ready = True  
+        
+                                            
+    def shell_loop(self, status):
+        
+        #ht = Thread(target=self.heartbeat_loop, args=() )
+        #ht.start()        
+        mes_q = Queue()
+        input_ready = True
+        res = ""
+        
+        while True:        
+            self.send_heartbeats()
+            if input_ready == True:
+                inp = input("MAVSH> ")            
+                cmd = " ".join(shlex.split(inp)).encode()
+                self.send_mavsh_exec(status, cmd)
+        
+            mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)            
+            while not mes:
+                mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)
+            mes_type = mes.get_type()
+            
+            if mes_type == "MAVSH_RESPONSE":                   
+                
+                if mes.cmd_status == mlink.MAVSH_EXECUTING:
+                    res += mes.response
+                    mes_q.put(mes.response)                    
+                    print(mes_q.qsize())
+                    input_ready = False
+
+                elif mes.cmd_status == mlink.MAVSH_IDLE:
+                    res += mes.response
+                    print(res)
+                    res = ""
+                    input_ready = True
+
+            elif mes_type == "MAVSH_SHUTDOWN":
+                print(mes)         

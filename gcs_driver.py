@@ -6,12 +6,12 @@ heartbeat = gcs.wait_heartbeat()
 print(heartbeat)
 # i think we need to init inside the loop
 import sys
-gcs.mavsh_init()
-gcs.message_loop()
-"""
+
 try:
     gcs.mavsh_init()
-    gcs.message_loop()
+    status = gcs.message_loop()
+    print(status)
+    gcs.shell_loop(status)
 except KeyboardInterrupt:
     print(gcs.request_mavsh_shutdown())
-"""
+
