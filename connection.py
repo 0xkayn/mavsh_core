@@ -4,6 +4,7 @@ import shlex
 import serial
 import asyncio
 from pymavlink import mavutil
+from mavsh_exceptions import *
 from asyncio.subprocess import PIPE, STDOUT
 from pymavlink.dialects.v20 import ardupilotmega as mlink
 
@@ -43,10 +44,9 @@ class MavshComponent:
     @status.setter
     def status(self, status):
         if status not in [mlink.MAVSH_INACTIVE, mlink.MAVSH_ACTIVE]:
-            raise Exception("Invalid session status. Must be MAVSH_INACTIVE or MAVSH_ACTIVE")        
+            raise SessionStatusException("Invalid session status. Must be MAVSH_INACTIVE or MAVSH_ACTIVE")        
         
-        self._status = status
-        
+        self._status = status                
 
     def __repr__(self):
         if self.conn is not None:
@@ -158,8 +158,8 @@ class MavshCompanion(MavshComponent):
             synack = self.conn.recv_match(type='MAVSH_SYNACK', blocking=False)                    
             
             if synack:
-                synack_recv = True            
-        print(status)
+                synack_recv = True
+
         return status
     
     def send_mavsh_shutdown(self, status):
@@ -175,17 +175,17 @@ class MavshCompanion(MavshComponent):
     def handle_mavsh_shutdown(self, mes):
         
         if self.status == mlink.MAVSH_INACTIVE:
-            raise Exception("Session currently inactive")
+            raise SessionStatusException("Session currently inactive")
         
         shutdown_status = mes.shutdown_flag
         # not sure if i want this up here yet or not
         if shutdown_status != mlink.MAVSH_SHUTDOWN:
-            raise Exception("MAVSH SHUTDOWN exception..?")
+            raise MavshShutdownException("MAVSH SHUTDOWN exception..?")
         
         # ensure the shutdown is coming from the system we expect it to
         if self.target_system == mes.sys_id and self.target_component == mes.comp_id:
             self.send_mavsh_shutdown(mlink.MAVSH_EXITING)
-            #self.status = mlink.MAVSH_INACTIVE
+            self.status = mlink.MAVSH_INACTIVE
         
         # otherwise send a shutdown not allowed response
         else:
@@ -200,8 +200,7 @@ class MavshCompanion(MavshComponent):
         print(mes)
         # cant manually send a heartbeat directly to this component so...
         #if mes.sys_id == self.components['mav']['system_id']:
-        if True:
-            print(self.status)            
+        if True:            
 
             # need to reply to the fc which should route the message, otherwise how will it get there..? 
             # ill likely need to modify the firmware again to actually have it forward/resend the message..?
@@ -232,7 +231,7 @@ class MavshCompanion(MavshComponent):
                 if exists == mlink.MAVSH_SESSION_EXISTS:
                     return mlink.MAVSH_SESSION_EXISTS
                 else:
-                    raise Exception("MAVSH_SESSION_EXISTS exception")
+                    raise SessionExistsException("MAVSH_SESSION_EXISTS exception")
             
             # dont send a response unless one of those conditions are true
             else:
@@ -284,8 +283,8 @@ class MavshCompanion(MavshComponent):
                 
                 print("MAVSH SESSION ACCEPTED")
                 time.sleep(.5)
-                self.status = mlink.MAVSH_ACTIVE
-                print(self.status)
+                #self.status = mlink.MAVSH_ACTIVE
+                                
                 #print(mlink.MAVSH_ACTIVE)
             elif mes_type == "MAVSH_SHUTDOWN":
                 print(mes)
@@ -313,13 +312,14 @@ class MavshGCS(MavshComponent):
             baud=57600 #this might be whats causing the issue 
         )
         self.mode = ''
-        self.status = mlink.MAVSH_INACTIVE        
+        self.status = mlink.MAVSH_INACTIVE
         self._last_heartbeat_sent = 0
         self.target_system = 1 # 1 is the systemid of the mav
         # 191 is the componentid of the companion computer - 191 is onboard controller in the MAV_COMPONENT enum 
         # sadly ardupilot doesnt use it - ill add it to custom firmware once 4.1 stable is out
-        self.target_component = 191            
-    
+        self.target_component = 191         
+        
+        
     # not sure if 2 mav_type gcs' will cause issues or not, might need to setup signing and have both have the key
     def send_heartbeats(self):
         now = time.time()
@@ -375,7 +375,7 @@ class MavshGCS(MavshComponent):
             if self.status != mlink.MAVSH_ACTIVE:
                 # try to send a mavsh shutdown packet here               
                 # should only accept the shutdown packet from the connection which set it up - use sysid/compid for this
-                self.send_mavsh_shutdown()
+                self.request_mavsh_shutdown()
                 
                 # wait 15 s for a shutdown packet - might need to make this None depending on how latency is outside                        
                 shutdown_msg = self.conn.recv_match(type='MAVSH_SHUTDOWN', blocking=True, timeout=15)                
@@ -398,7 +398,6 @@ class MavshGCS(MavshComponent):
             mlink.MAVSH_INIT
         )
         return
-
     
     def mavsh_init(self):        
         """ MAVSH init procedure """
@@ -425,11 +424,11 @@ class MavshGCS(MavshComponent):
             while not mes:  
                 mes = self.conn.recv_match(blocking=False)
             mes_type = mes.get_type()
-
+            
             # a gcs shouldn't be getting an init
             if mes_type == "MAVSH_INIT":
-                pass
-            # if we get a mavsh_ack
+                pass            
+            
             elif mes_type == "MAVSH_ACK":                
                 self.handle_mavsh_ack(mes)
             
@@ -440,7 +439,7 @@ class MavshGCS(MavshComponent):
                 #print(self.loop.create_task(self.run_cmd(mes.payload)))
                 #print(self.handle_mavsh_exec(mes).decode)
                 print(mes)
-
+            
             # handle the shell portion here
             elif mes_type == "MAVSH_RESPONSE":
                 pass
