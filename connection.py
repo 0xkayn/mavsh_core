@@ -332,13 +332,13 @@ class MavshCompanion(MavshComponent):
         return
 
     async def handle_mavsh_exec(self, mes):         
-        response_queue = Queue()
+        response_queue = asyncio.Queue()
 
-        def chunk_result(res, q):
+        async def chunk_result(res, q):
             # chunks the response message into a max size of 154 bytes          
             #return [res[i:i+154] for i in range(0, len(res), 154)]
-            for i in range(0, len(res), 153):                        
-                q.put(res[i:i+153])
+            for i in range(0, len(res), 70):                     
+                await q.put(res[i:i+70])
 
         async def run_cmd(cmd):
             # shlex.split will escape characters used for cmd injection
@@ -383,32 +383,33 @@ class MavshCompanion(MavshComponent):
         print(result)
 
         if len(result) > 154:                        
-            chunk_result(result, response_queue)
+            await chunk_result(result, response_queue)
         else:
-            response_queue.put(result)
-        
-        
+            await response_queue.put(result)
+                
         while not response_queue.empty():
             """
             need to modify this to let us know when the final chunk is being sent/when full packet ends 
             """
             try:
-                chunk = response_queue.get()                
-                if response_queue.qsize() != 0:
+                chunk = await response_queue.get()                
+                if response_queue.qsize() == 0:
                     """
                     once cmd_status enum changes set this to MAVSH_COMMAND_COMPLETE
                     """
-                    self.send_mavsh_response(mlink.MAVSH_EXECUTING, chunk)                    
-                elif response_queue.qsize == 0:
                     self.send_mavsh_response(mlink.MAVSH_IDLE, chunk)
+                    time.sleep(.2)
+                else:
+                    self.send_mavsh_response(mlink.MAVSH_EXECUTING, chunk)
+                    time.sleep(.2)                    
                     # this MIGHT be causing the connection loss issue
 
-            except Empty:
-                import pdb
-                pdb.set_trace()
-                #self.send_mavsh_response(mlink.MAVSH_EXECUTING, '')
+            except Exception:
+                #import pdb
+                #pdb.set_trace()
+                self.send_mavsh_response(mlink.MAVSH_IDLE, 'ERROR')
+                time.sleep(1)                    
                 #self.send_heartbeat()
-
 
         return result
 
@@ -588,7 +589,7 @@ class MavshGCS(MavshComponent):
                     # this is the actual sus part...
 
     def message_loop(self):
-
+        
         while self.status != mlink.MAVSH_ACTIVE:   
         #while True:
             self.send_heartbeats()                 
@@ -600,14 +601,15 @@ class MavshGCS(MavshComponent):
 
             if mes_type == "MAVSH_ACK":                
                 self.handle_mavsh_ack(mes)            
-            
+
             elif mes_type == "MAVSH_SYNACK":
                 print(mes)
-                if self.status == mlink.MAVSH_INACTIVE:
-                    self.status = mlink.MAVSH_ACTIVE                
-                    #self.loop.create_task(self.shell_loop(self.status))
-                    return self.status
-            
+                if self.status == mlink.MAVSH_INACTIVE:                    
+                    #self.loop.create_task(self.shell_loop())
+                    self.status = mlink.MAVSH_ACTIVE
+                    return mlink.MAVSH_ACTIVE
+                    #asyncio.run(self.shell_loop(self.status))
+
             elif mes_type == "MAVSH_SHUTDOWN":
                 print(mes)
 
@@ -620,10 +622,71 @@ class MavshGCS(MavshComponent):
     
     def heartbeat_loop(self):
         while True:
-            self.send_heartbeats()    
+            self.send_heartbeats()           
+    
+    import re
+
+    async def handle_mavsh_response(self, mes):         
+        #response_queue = Queue()
+
+        async def update_console(mes):
+            try:
+                
+                result = re.replace(".*\\n.+\s+", " ", mes.response.decode())
+                #result = re.replace(".*\\n\s*", " ", mes.response.decode())
+                
+                return result
+            except Exception:
+                return mes.response
+            
+            #if mes.cmd_status == mlink.MAVSH_IDLE:                         
+            #    return mes.response
+            #elif mes.cmd_status == mlink.MAVSH_EXECUTING:                
+            #    return mes.response.rstrip()
+
+        
+        #command_started = time.time()
+        result = await update_console(mes)                      
+        print(result, end="")
+        if mes.cmd_status == mlink.MAVSH_IDLE:
+            return True        
+        
+        return False        
+    
+    async def shell_loop(self):                       
+        input_ready = True
+        res = "" 
+
+        while True:
+            #self.send_heartbeats()
+            if input_ready == True:
+                inp = input("MAVSH> ")
+                cmd = " ".join(shlex.split(inp))
+                self.send_mavsh_exec(self.status, cmd)
+            
+            mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)
+            while not mes:  
+                mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)
+
+            mes_type = mes.get_type()
+
+            if mes_type == "MAVSH_RESPONSE":
+                await self.handle_mavsh_response(mes)
+                if mes.cmd_status == mlink.MAVSH_EXECUTING:                    
+                    input_ready = False
+                    #print(mes.response)
+                    
+                    #await self.handle_mavsh_response(mes)
+                elif mes.cmd_status == mlink.MAVSH_IDLE:
+                    input_ready = True
+
+                
+            else:                
+                print(mes)
+    
     """
 
-    Two variations of handling response mes, need to change enum flags first
+     #Two variations of handling response mes, need to change enum flags first
     
     def handle_mavsh_response(self, mes, q):                
         # check to see if we will be recv more messages
@@ -638,8 +701,8 @@ class MavshGCS(MavshComponent):
         elif mes.cmd_status == mlink.MAVSH_EXECUTING:
             q.put(mes.response)
             return mes.cmd_status
-                    
-
+    
+    #
     def handle_mavsh_resq(self, mes, q):                
         if mes.cmd_status == mlink.MAVSH_EXECUTING:
             res += mes.response
@@ -656,9 +719,8 @@ class MavshGCS(MavshComponent):
                 except Empty:
                     print(out)
                     input_ready = True  
-       """ 
-
-
+    
+    #
     def shell_loop(self, status):
         
         #ht = Thread(target=self.heartbeat_loop, args=() )        
@@ -667,13 +729,41 @@ class MavshGCS(MavshComponent):
         input_ready = True        
         
         while True:        
-            #self.send_heartbeats()
+            self.send_heartbeats()
             if input_ready == True:
                 inp = input("MAVSH> ")
                 cmd = " ".join(shlex.split(inp))
                 self.send_mavsh_exec(status, cmd)
 
-            """
+            mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)            
+            while not mes:
+                mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)
+                            
+            mes_type = mes.get_type()            
+            
+            if mes_type == "MAVSH_RESPONSE":                                   
+                r = mes.response.strip()                
+                print(mes)
+                if mes.cmd_status == mlink.MAVSH_EXECUTING:                    
+                    res += mes.response                    
+                    #mes_q.put(mes.response)                    
+                    #input_ready = False
+
+                elif mes.cmd_status == mlink.MAVSH_IDLE:
+                    res += mes.response
+                    #print(res)
+                    #print(self.conn.messages)
+                    #import pdb
+                    #pdb.set_trace()
+                    print(r)
+                    res = ""
+                    input_ready = True
+            
+            elif mes_type == "MAVSH_SHUTDOWN":
+                print(mes)
+        
+        
+        #
             mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=True)            
             print(mes)
             # adding this block to search for more responses until idle flag is found
@@ -684,7 +774,7 @@ class MavshGCS(MavshComponent):
                     print(r)                
                     mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=True)            
                 
-            """
+            
 
             response_queue = Queue()
             while True:
@@ -704,12 +794,13 @@ class MavshGCS(MavshComponent):
                 import pdb
                 pdb.set_trace()
             
-            """
+            ### 
+            
             #mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)
             input_ready = False
-            mes = self.conn.recv_match(blocking=False)            
+            mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)            
             while not mes:
-                mes = self.conn.recv_match(blocking=False)
+                mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)
                             
             mes_type = mes.get_type()
             
@@ -718,80 +809,85 @@ class MavshGCS(MavshComponent):
                 import pdb
                 pdb.set_trace()
                 r = mes.response.strip()                
+                print(r)
                 if mes.cmd_status == mlink.MAVSH_EXECUTING:                    
-                    res += mes.response
-                    #print(r)
+                    res += mes.response                    
                     #mes_q.put(mes.response)                    
                     input_ready = False
 
                 elif mes.cmd_status == mlink.MAVSH_IDLE:
                     res += mes.response
-                    print(res)
+                    #print(res)
                     #print(self.conn.messages)
                     #import pdb
                     #pdb.set_trace()
-                    #print(r)
+                    print(r)
                     res = ""
-                    input_ready = True  
+                    input_ready = True
             
             elif mes_type == "MAVSH_SHUTDOWN":
                 print(mes)
-        """
         
-
-    async def shelll_loop(self, status):
-            
-        res = ""
-        input_ready = True        
-        
-        while True:                
-            
-            if input_ready == True:
-                inp = input("MAVSH> ")
-                cmd = " ".join(shlex.split(inp))
-                self.send_mavsh_exec(status, cmd)
-            
-            mes = self.conn.recv_match(blocking=False)   
-            while not mes:  
-                mes = self.conn.recv_match(blocking=False)         
-            mes_type = mes.get_type()
-                        
-            if mes_type == "MAVSH_RESPONSE":
-                await print(mes)
-                await response_queue.put(mes)
+        #
+        async def shelll_loop(self, status):
                 
-                #if mes.cmd_status == mlink.MAVSH_IDLE:                
-                #print(mes)
-            """
-            #mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)
-            input_ready = False
-            mes = self.conn.recv_match(blocking=False)            
-            while not mes:
-                mes = self.conn.recv_match(blocking=False)
-                            
-            mes_type = mes.get_type()
+            res = ""
+            input_ready = True        
             
-            
-            if mes_type == "MAVSH_RESPONSE":                   
-                import pdb
-                pdb.set_trace()
-                r = mes.response.strip()                
-                if mes.cmd_status == mlink.MAVSH_EXECUTING:                    
-                    res += mes.response
-                    #print(r)
-                    #mes_q.put(mes.response)                    
-                    input_ready = False
-
-                elif mes.cmd_status == mlink.MAVSH_IDLE:
-                    res += mes.response
-                    print(res)
-                    #print(self.conn.messages)
-                    #import pdb
-                    #pdb.set_trace()
-                    #print(r)
-                    res = ""
-                    input_ready = True  
-            
-            elif mes_type == "MAVSH_SHUTDOWN":
+            while True:                
+                
+                if input_ready == True:
+                    inp = input("MAVSH> ")
+                    cmd = " ".join(shlex.split(inp))
+                    self.send_mavsh_exec(status, cmd)
+                
+                mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)
+                while not mes:
+                    mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)
                 print(mes)
-        """
+                await mes
+                
+                #
+                
+                mes = self.conn.recv_match(blocking=False)         
+                mes_type = mes.get_type()
+                            
+                if mes_type == "MAVSH_RESPONSE":
+                    await print(mes)
+                    await response_queue.put(mes)
+                    
+                    #if mes.cmd_status == mlink.MAVSH_IDLE:                
+                    #print(mes)
+                #
+
+                #mes = self.conn.recv_match(type="MAVSH_RESPONSE", blocking=False)
+                input_ready = False
+                mes = self.conn.recv_match(blocking=False)            
+                while not mes:
+                    mes = self.conn.recv_match(blocking=False)
+                                
+                mes_type = mes.get_type()
+                                
+                if mes_type == "MAVSH_RESPONSE":                   
+                    import pdb
+                    pdb.set_trace()
+                    r = mes.response.strip()                
+                    if mes.cmd_status == mlink.MAVSH_EXECUTING:                    
+                        res += mes.response
+                        #print(r)
+                        #mes_q.put(mes.response)                    
+                        input_ready = False
+
+                    elif mes.cmd_status == mlink.MAVSH_IDLE:
+                        res += mes.response
+                        print(res)
+                        #print(self.conn.messages)
+                        #import pdb
+                        #pdb.set_trace()
+                        #print(r)
+                        res = ""
+                        input_ready = True  
+                
+                elif mes_type == "MAVSH_SHUTDOWN":
+                    print(mes)
+            """
