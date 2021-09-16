@@ -5,6 +5,7 @@ from pymavlink.dialects.v20 import ardupilotmega as mlink
 import asyncio 
 import os
 
+<<<<<<< HEAD
 class MAVSH:
 
     def __init__(self):
@@ -236,3 +237,24 @@ m.start()
 #    gcs.loop.run_forever()
 #except KeyboardInterrupt:
 #    print(gcs.request_mavsh_shutdown())
+=======
+
+gcs = MavshGCS('/dev/ttyACM0')
+print(gcs)
+heartbeat = gcs.wait_heartbeat()
+print(heartbeat)
+# i think we need to init inside the loop
+import sys
+
+try:        
+    gcs.loop.run_forever()
+
+except KeyboardInterrupt:
+    gcs.request_mavsh_shutdown()
+
+"""
+try:
+    gcs.mavsh_init()
+    gcs.message_loop()
+"""
+>>>>>>> main
